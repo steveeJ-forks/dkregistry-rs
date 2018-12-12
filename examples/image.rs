@@ -2,7 +2,7 @@ extern crate dirs;
 extern crate dkregistry;
 extern crate futures;
 extern crate serde_json;
-extern crate tokio_core;
+extern crate tokio;
 
 use dkregistry::{reference, render};
 use futures::prelude::*;
@@ -10,7 +10,6 @@ use scopetracker::{AllocationTracker, ScopeTracker};
 use std::result::Result;
 use std::str::FromStr;
 use std::{boxed, env, error, fs, io};
-use tokio_core::reactor::Core;
 
 #[global_allocator]
 static GLOBAL: AllocationTracker = AllocationTracker::new();
@@ -127,10 +126,9 @@ fn run(
                 .collect()
         });
 
-    let blobs = match tcore.run(futures) {
-        Ok(blobs) => blobs,
-        Err(e) => return Err(Box::new(e)),
-    };
+    let blobs = tokio::runtime::current_thread::Runtime::new()
+        .unwrap()
+        .block_on(futures)?;
 
     println!("Downloaded {} layers", blobs.len());
 
