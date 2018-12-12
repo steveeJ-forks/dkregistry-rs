@@ -48,13 +48,14 @@ fn main() {
             println!("[{}] no $DKREG_PASSWD for login password", registry);
         }
     };
+    {
+        mem_guard!("run");
+        let res = run(&dkr_ref, user, password);
 
-    let res = run(&dkr_ref, user, password);
-
-    if let Err(e) = res {
-        println!("[{}] {}", registry, e);
-        std::process::exit(1);
-    };
+        if let Err(e) = res {
+            println!("[{}] {}", registry, e);
+        };
+    }
 }
 
 fn run(
