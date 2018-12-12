@@ -132,8 +132,10 @@ fn run(
     let path = &format!("{}:{}", &image, &version).replace("/", "_");
     let path = std::path::Path::new(&path);
     if path.exists() {
-        return Err(format!("path {:?} already exists, exiting", &path).into());
+        println!("path {:?} already exists, removing...", &path);
+        std::fs::remove_dir_all(path)?;
     }
+
     // TODO: use async io
     std::fs::create_dir(&path).unwrap();
     let can_path = path.canonicalize().unwrap();
