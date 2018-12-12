@@ -63,7 +63,9 @@ fn run(
     user: Option<String>,
     passwd: Option<String>,
 ) -> Result<(), boxed::Box<error::Error>> {
-    let mut client = dkregistry::v2::Client::configure()
+    let mut tcore = try!(tokio_core::reactor::Core::new());
+
+    let mut client = dkregistry::v2::Client::configure(&tcore.handle())
         .registry(&dkr_ref.registry())
         .insecure_registry(false)
         .username(user)

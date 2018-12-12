@@ -32,7 +32,7 @@ fn test_dockerio_base() {
     };
 
     let mut tcore = Core::new().unwrap();
-    let dclient = dkregistry::v2::Client::configure()
+    let dclient = dkregistry::v2::Client::configure(&tcore.handle())
         .registry(REGISTRY)
         .insecure_registry(false)
         .username(Some(user))
@@ -49,7 +49,7 @@ fn test_dockerio_base() {
 #[test]
 fn test_dockerio_insecure() {
     let mut tcore = Core::new().unwrap();
-    let dclient = dkregistry::v2::Client::configure()
+    let dclient = dkregistry::v2::Client::configure(&tcore.handle())
         .registry(REGISTRY)
         .insecure_registry(true)
         .username(None)
