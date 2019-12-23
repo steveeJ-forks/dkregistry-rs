@@ -1,6 +1,4 @@
-use crate::v2::{Error, FutureResult};
-use futures::future::{self, Future};
-use futures::stream::Stream;
+use crate::v2::{Error, Result};
 use serde_json;
 
 /// Manifest version 2 schema 2.
@@ -90,11 +88,11 @@ impl ManifestSchema2Spec {
     }
 
     /// Fetch the config blob for this manifest
-    pub(crate) fn fetch_config_blob(
+    pub(crate) async fn fetch_config_blob(
         self,
         client: crate::v2::Client,
         repo: String,
-    ) -> FutureResult<ManifestSchema2> {
+    ) -> Result<ManifestSchema2> {
         let url = {
             let ep = format!(
                 "{}/v2/{}/blobs/{}",
@@ -102,46 +100,30 @@ impl ManifestSchema2Spec {
                 repo,
                 self.config.digest
             );
-            match reqwest::Url::parse(&ep) {
-                Ok(url) => url,
-                Err(e) => {
-                    return Box::new(future::err::<_, _>(Error::from(format!(
-                        "failed to parse url from string '{}': {}",
-                        ep, e
-                    ))));
-                }
-            }
+            reqwest::Url::parse(&ep).map_err(|e| {
+                Error::from(format!("failed to parse url from string '{}': {}", ep, e))
+            })?
         };
 
-        let manifest_future = client
+        let res = client
             .build_reqwest(reqwest::r#async::Client::new().get(url.clone()))
             .send()
-            .map_err(|e| crate::v2::Error::from(format!("{}", e)))
-            .and_then(move |r| {
-                let status = r.status();
-                trace!("GET {:?}: {}", url, &status);
+            .await
+            .map_err(|e| crate::v2::Error::from(format!("{}", e)))?;
 
-                if status.is_success() {
-                    Ok(r)
-                } else {
-                    Err(format!("wrong HTTP status '{}'", status).into())
-                }
-            })
-            .and_then(|r| {
-                r.into_body()
-                    .concat2()
-                    .map_err(|e| Error::from(format!("{}", e)))
-            })
-            .and_then(|body| {
-                let config_blob = serde_json::from_slice::<ConfigBlob>(&body)?;
+        let status = res.status();
+        trace!("GET {:?}: {}", url, &status);
 
-                Ok(ManifestSchema2 {
-                    manifest_spec: self,
-                    config_blob,
-                })
-            });
+        if !status.is_success() {
+            return Err(format!("wrong HTTP status '{}'", status).into());
+        }
 
-        Box::new(manifest_future)
+        let config_blob = serde_json::from_slice::<ConfigBlob>(&res.bytes().await?)?;
+
+        Ok(ManifestSchema2 {
+            manifest_spec: self,
+            config_blob,
+        })
     }
 }
 

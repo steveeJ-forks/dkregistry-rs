@@ -1,9 +1,8 @@
 //! Manifest types.
 use crate::mediatypes;
+use crate::mediatypes::MediaTypes;
 use crate::v2::*;
 
-use futures::future::Either;
-use futures::{future, Stream};
 use mime;
 use reqwest::{self, header, StatusCode, Url};
 use std::iter::FromIterator;
@@ -20,18 +19,21 @@ impl Client {
     ///
     /// The name and reference parameters identify the image.
     /// The reference may be either a tag or digest.
-    pub fn get_manifest(&self, name: &str, reference: &str) -> FutureManifest {
-        Box::new(
-            self.get_manifest_and_ref(name, reference)
-                .map(|(manifest, _)| manifest),
-        )
+    pub async fn get_manifest(&self, name: &str, reference: &str) -> Result<Manifest> {
+        self.get_manifest_and_ref(name, reference)
+            .await
+            .map(|(manifest, _)| manifest)
     }
 
     /// Fetch an image manifest and return it with its digest.
     ///
     /// The name and reference parameters identify the image.
     /// The reference may be either a tag or digest.
-    pub fn get_manifest_and_ref(&self, name: &str, reference: &str) -> FutureManifestAndRef {
+    pub async fn get_manifest_and_ref(
+        &self,
+        name: &str,
+        reference: &str,
+    ) -> Result<(Manifest, Option<String>)> {
         let name = name.to_string();
 
         let url = {
@@ -41,15 +43,9 @@ impl Client {
                 name,
                 reference
             );
-            match reqwest::Url::parse(&ep) {
-                Ok(url) => url,
-                Err(e) => {
-                    return Box::new(future::err::<_, _>(Error::from(format!(
-                        "failed to parse url from string '{}': {}",
-                        ep, e
-                    ))));
-                }
-            }
+            reqwest::Url::parse(&ep).map_err(|e| {
+                Error::from(format!("failed to parse url from string '{}': {}", ep, e))
+            })?
         };
 
         let accept_headers = header::HeaderMap::from_iter(
@@ -76,100 +72,82 @@ impl Client {
 
         let client_spare0 = self.clone();
 
-        let fres = self
-            .build_reqwest(
-                reqwest::r#async::Client::new()
-                    .get(url)
-                    .headers(accept_headers),
-            )
+        let res = self
+            .build_reqwest(reqwest::Client::new().get(url).headers(accept_headers))
             .send()
-            .map_err(|e| Error::from(format!("{}", e)))
-            .and_then(|res| {
-                let status = res.status();
-                trace!("GET '{}' status: {:?}", res.url(), status);
+            .await?;
 
-                match status {
-                    StatusCode::OK => Ok(res),
-                    _ => Err(format!("GET {}: wrong HTTP status '{}'", res.url(), status).into()),
-                }
-            })
-            .and_then(|res| {
-                future::ok((res.headers().clone(), res.url().clone())).join(
-                    res.into_body()
-                        .concat2()
-                        .map_err(|e| Error::from(format!("{}", e))),
-                )
-            })
-            .map_err(|e| Error::from(format!("{}", e)))
-            .and_then(|((headers, url), body)| {
-                let content_digest = match headers.get("docker-content-digest") {
-                    Some(content_digest_value) => Some(
-                        content_digest_value
-                            .to_str()
-                            .map_err(Error::from)?
-                            .to_string(),
-                    ),
-                    None => {
-                        debug!("cannot find manifestref in headers");
-                        None
-                    }
-                };
+        let status = res.status();
+        trace!("GET '{}' status: {:?}", res.url(), status);
 
-                let header_content_type = headers.get(header::CONTENT_TYPE);
-                let media_type = evaluate_media_type(header_content_type, &url)?;
+        if !status.is_success() {
+            return Err(format!("GET {}: wrong HTTP status '{}'", res.url(), status).into());
+        };
 
-                trace!(
-                    "content-type: {:?}, media-type: {:?}",
-                    header_content_type,
-                    media_type
-                );
+        let headers = res.headers();
+        let body = res.bytes().await?;
 
-                Ok((body, content_digest, media_type))
-            })
-            .and_then(move |(body, content_digest, media_type)| {
-                match media_type {
-                    mediatypes::MediaTypes::ManifestV2S1Signed => {
-                        Either::A(futures::future::result(
-                            serde_json::from_slice::<ManifestSchema1Signed>(&body)
-                                .map_err(|e| Error::from(format!("{}", e)))
-                                .map(Manifest::S1Signed),
-                        ))
-                    }
-                    mediatypes::MediaTypes::ManifestV2S2 => Either::B(
-                        futures::future::result(serde_json::from_slice::<ManifestSchema2Spec>(
-                            &body,
-                        ))
-                        .map_err(|e| Error::from(format!("{}", e)))
-                        .and_then(move |m| {
-                            m.fetch_config_blob(client_spare0, name.to_string())
-                                .map(Manifest::S2)
-                        }),
-                    ),
-                    mediatypes::MediaTypes::ManifestList => Either::A(futures::future::result(
-                        serde_json::from_slice::<ManifestList>(&body)
-                            .map_err(|e| Error::from(format!("{}", e)))
-                            .map(Manifest::ML),
-                    )),
-                    unsupported => Either::A(future::err(Error::from(format!(
-                        "unsupported mediatype '{:?}'",
-                        unsupported
-                    )))),
-                }
-                .and_then(|manifest| Ok((manifest, content_digest)))
-            });
-        Box::new(fres)
+        let content_digest = match headers.get("docker-content-digest") {
+            Some(content_digest_value) => Some(
+                content_digest_value
+                    .to_str()
+                    .map_err(Error::from)?
+                    .to_string(),
+            ),
+            None => {
+                debug!("cannot find manifestref in headers");
+                None
+            }
+        };
+
+        let header_content_type = headers.get(header::CONTENT_TYPE);
+        let media_type = evaluate_media_type(header_content_type, &url)?;
+
+        trace!(
+            "content-type: {:?}, media-type: {:?}",
+            header_content_type,
+            media_type
+        );
+
+        let manifest: Manifest = match media_type {
+            mediatypes::MediaTypes::ManifestV2S1Signed => {
+                serde_json::from_slice::<ManifestSchema1Signed>(&body)
+                    .map_err(|e| Error::from(format!("{}", e)))
+                    .map(Manifest::S1Signed)?
+            }
+            mediatypes::MediaTypes::ManifestV2S2 => {
+                let m = serde_json::from_slice::<ManifestSchema2Spec>(&body)
+                    .map_err(|e| Error::from(format!("{}", e)))?;
+
+                m.fetch_config_blob(client_spare0, name.to_string())
+                    .await
+                    .map(Manifest::S2)?
+            }
+            mediatypes::MediaTypes::ManifestList => serde_json::from_slice::<ManifestList>(&body)
+                .map_err(|e| Error::from(format!("{}", e)))
+                .map(Manifest::ML)?,
+
+            unsupported => {
+                return Err(Error::from(format!(
+                    "unsupported mediatype '{:?}'",
+                    unsupported
+                )))
+            }
+        };
+
+        Ok((manifest, content_digest))
     }
 
     /// Check if an image manifest exists.
     ///
     /// The name and reference parameters identify the image.
     /// The reference may be either a tag or digest.
-    pub fn has_manifest(
+    pub async fn has_manifest(
         &self,
         name: &str,
         reference: &str,
         mediatypes: Option<&[&str]>,
-    ) -> mediatypes::FutureMediaType {
+    ) -> Result<Option<MediaTypes>> {
         let url = {
             let ep = format!(
                 "{}/v2/{}/manifests/{}",
@@ -177,81 +155,65 @@ impl Client {
                 name,
                 reference
             );
-            match Url::parse(&ep) {
-                Ok(url) => url,
-                Err(e) => {
-                    return Box::new(future::err::<_, _>(Error::from(format!(
-                        "failed to parse url from string '{}': {}",
-                        ep, e
-                    ))));
+
+            Url::parse(&ep).map_err(|e| {
+                Error::from(format!("failed to parse url from string '{}': {}", ep, e))
+            })?
+        };
+
+        let accept_types = match mediatypes {
+            None => {
+                if let Ok(m) = mediatypes::MediaTypes::ManifestV2S2.to_mime() {
+                    Ok(vec![m])
+                } else {
+                    Err(Error::from("to_mime failed"))
                 }
             }
-        };
-        let accept_types = match {
-            match mediatypes {
-                None => {
-                    if let Ok(m) = mediatypes::MediaTypes::ManifestV2S2.to_mime() {
-                        Ok(vec![m])
-                    } else {
-                        Err(Error::from("to_mime failed"))
-                    }
-                }
-                Some(ref v) => to_mimes(v),
-            }
-        } {
-            Ok(x) => x,
-            Err(e) => {
-                return Box::new(future::err::<_, _>(Error::from(format!(
-                    "failed to match mediatypes: {}",
-                    e
-                ))));
-            }
-        };
+            Some(ref v) => to_mimes(v),
+        }
+        .map_err(|e| Error::from(format!("failed to match mediatypes: {}", e)))?;
 
         let mut accept_headers = header::HeaderMap::with_capacity(accept_types.len());
         for accept_type in accept_types {
             match header::HeaderValue::from_str(&accept_type.to_string()) {
                 Ok(header_value) => accept_headers.insert(header::ACCEPT, header_value),
                 Err(e) => {
-                    return Box::new(future::err::<_, _>(Error::from(format!(
+                    return Err(Error::from(format!(
                         "failed to parse mime '{}' as accept_header: {}",
                         accept_type, e
-                    ))));
+                    )));
                 }
             };
         }
 
-        let fres = self
-            .build_reqwest(reqwest::r#async::Client::new().get(url.clone()))
+        let res = self
+            .build_reqwest(reqwest::Client::new().get(url.clone()))
             .headers(accept_headers)
             .send()
             .map_err(Error::from)
             .inspect(move |_| {
                 trace!("HEAD {:?}", url);
             })
-            .and_then(|r| {
-                let status = r.status();
-                let media_type =
-                    evaluate_media_type(r.headers().get(header::CONTENT_TYPE), &r.url())?;
+            .await?;
 
-                trace!(
-                    "Manifest check status '{:?}', headers '{:?}, media-type: {:?}",
-                    r.status(),
-                    r.headers(),
-                    media_type
-                );
+        let status = res.status();
+        let media_type = evaluate_media_type(res.headers().get(header::CONTENT_TYPE), &res.url())?;
 
-                let res = match status {
-                    StatusCode::MOVED_PERMANENTLY
-                    | StatusCode::TEMPORARY_REDIRECT
-                    | StatusCode::FOUND
-                    | StatusCode::OK => Some(media_type),
-                    StatusCode::NOT_FOUND => None,
-                    _ => bail!("has_manifest: wrong HTTP status '{}'", &status),
-                };
-                Ok(res)
-            });
-        Box::new(fres)
+        trace!(
+            "Manifest check status '{:?}', headers '{:?}, media-type: {:?}",
+            res.status(),
+            res.headers(),
+            media_type
+        );
+
+        match status {
+            StatusCode::MOVED_PERMANENTLY
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::FOUND
+            | StatusCode::OK => Ok(Some(media_type)),
+            StatusCode::NOT_FOUND => Ok(None),
+            _ => bail!("has_manifest: wrong HTTP status '{}'", &status),
+        }
     }
 }
 

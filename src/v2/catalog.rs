@@ -1,11 +1,6 @@
-use crate::errors::{Error, Result};
+use crate::errors::Result;
 use crate::v2;
-use futures::{self, stream, Future, Stream};
-use reqwest::StatusCode;
 use serde_json;
-
-/// Convenience alias for a stream of `String` repos.
-pub type StreamCatalog = Box<dyn futures::Stream<Item = String, Error = Error>>;
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct Catalog {
@@ -13,7 +8,7 @@ struct Catalog {
 }
 
 impl v2::Client {
-    pub fn get_catalog(&self, paginate: Option<u32>) -> StreamCatalog {
+    pub async fn get_catalog(&self, paginate: Option<u32>) -> Result<Catalog> {
         let url = {
             let suffix = if let Some(n) = paginate {
                 format!("?n={}", n)
@@ -21,40 +16,26 @@ impl v2::Client {
                 "".to_string()
             };
             let ep = format!("{}/v2/_catalog{}", self.base_url.clone(), suffix);
-            match reqwest::Url::parse(&ep) {
-                Ok(url) => url,
-                Err(e) => {
-                    return Box::new(stream::once::<_, _>(Err(Error::from(format!(
-                        "failed to parse url from string '{}': {}",
-                        ep, e
-                    )))));
-                }
-            }
+            reqwest::Url::parse(&ep)
+                .map_err(|e| format!("failed to parse url from string '{}': {}", ep, e))?
         };
 
-        let req = self.build_reqwest(reqwest::r#async::Client::new().get(url));
-
-        let fres = req
+        let res = self
+            .build_reqwest(reqwest::Client::new().get(url))
             .send()
-            .from_err()
-            .and_then(|r| {
-                let status = r.status();
-                trace!("Got status: {:?}", status);
-                match status {
-                    StatusCode::OK => Ok(r),
-                    _ => Err(format!("get_catalog: wrong HTTP status '{}'", status).into()),
-                }
-            })
-            .and_then(|r| {
-                r.into_body().concat2().map_err(|e| {
-                    format!("get_catalog: failed to fetch the whole body: {}", e).into()
-                })
-            })
-            .and_then(|body| -> Result<Catalog> {
-                serde_json::from_slice(&body).map_err(|e| e.into())
-            })
-            .map(|cat| futures::stream::iter_ok(cat.repositories.into_iter()))
-            .flatten_stream();
-        Box::new(fres)
+            .await?;
+
+        let status = res.status();
+        trace!("Got status: {:?}", status);
+
+        if !status.is_success() {
+            return Err(format!("get_catalog: wrong HTTP status '{}'", status).into());
+        }
+
+        let body = res.bytes().await?;
+
+        let catalog: Catalog = serde_json::from_slice(&body)?;
+
+        Ok(catalog)
     }
 }

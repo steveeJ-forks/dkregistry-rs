@@ -2,7 +2,7 @@ use crate::v2::*;
 use reqwest::{self, header, Url};
 
 /// Convenience alias for a stream of `String` tags.
-pub type StreamTags = Box<dyn futures::Stream<Item = String, Error = Error> + Send>;
+pub type StreamTags = Box<dyn futures::Stream<Item = Result<String>> + Send>;
 
 /// A chunk of tags for an image.
 ///

@@ -30,7 +30,6 @@
 //! ```
 
 use super::errors::*;
-use crate::v2::manifest::Manifest;
 use futures::prelude::*;
 use reqwest::StatusCode;
 use serde_json;
@@ -39,7 +38,8 @@ mod config;
 pub use self::config::Config;
 
 mod catalog;
-pub use self::catalog::StreamCatalog;
+// TODO: do we need a special stream type for this?
+// pub use self::catalog::StreamCatalog;
 
 mod auth;
 pub use self::auth::{FutureTokenAuth, TokenAuth};
@@ -65,52 +65,37 @@ pub struct Client {
     token: Option<String>,
 }
 
-/// Convenience alias for an arbitrary future type
-pub type FutureResult<T> = Box<dyn Future<Item = T, Error = Error> + Send>;
-
-/// Convenience alias for a future boolean result.
-pub type FutureBool = Box<dyn Future<Item = bool, Error = Error> + Send>;
-
-/// Convenience alias for a future manifest blob.
-pub type FutureManifest = Box<dyn Future<Item = Manifest, Error = Error> + Send>;
-
-/// Convenience alias for a future manifest blob and ref.
-pub type FutureManifestAndRef =
-    Box<dyn Future<Item = (Manifest, Option<String>), Error = Error> + Send>;
-
 impl Client {
     pub fn configure() -> Config {
         Config::default()
     }
 
     /// Ensure remote registry supports v2 API.
-    pub fn ensure_v2_registry(self) -> impl Future<Item = Self, Error = Error> + Send {
-        self.is_v2_supported()
-            .map(move |ok| (ok, self))
-            .and_then(|(ok, client)| {
-                if !ok {
-                    bail!("remote server does not support docker-registry v2 API")
-                } else {
-                    Ok(client)
-                }
-            })
+    pub async fn ensure_v2_registry(self) -> Result<Self> {
+        if !self.is_v2_supported().await? {
+            bail!("remote server does not support docker-registry v2 API")
+        };
+
+        Ok(self)
     }
 
     /// Check whether remote registry supports v2 API.
-    pub fn is_v2_supported(&self) -> impl Future<Item = bool, Error = Error> {
+    pub async fn is_v2_supported(&self) -> Result<bool> {
         let api_header = "Docker-Distribution-API-Version";
         let api_version = "registry/2.0";
 
         // GET request to bare v2 endpoint.
         let v2_endpoint = format!("{}/v2/", self.base_url);
-        let get_v2 = reqwest::Url::parse(&v2_endpoint)
-            .chain_err(|| format!("failed to parse url string '{}'", &v2_endpoint))
-            .map(|url| {
-                trace!("GET {:?}", url);
-                self.build_reqwest(reqwest::r#async::Client::new().get(url))
-            })
-            .into_future()
-            .and_then(|req| req.send().from_err());
+        let url = reqwest::Url::parse(&v2_endpoint)
+            .map_err(|e| Error::from(format!("failed to parse url string '{}'", &v2_endpoint)))?;
+
+        trace!("GET {:?}", url);
+
+        let get_v2 = self
+            .build_reqwest(reqwest::Client::new().get(url))
+            .send()
+            .map_err(Error::from)
+            .await;
 
         // Check status code and API headers according to spec:
         // https://docs.docker.com/registry/spec/api/#api-version-check
@@ -123,8 +108,9 @@ impl Client {
                     Ok(false)
                 }
             })
-            .inspect(|b| {
-                trace!("v2 API supported: {}", b);
+            .map(|b| {
+                trace!("v2 API supported: {}", &b);
+                b
             })
     }
 
