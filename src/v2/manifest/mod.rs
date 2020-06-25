@@ -34,13 +34,13 @@ impl Client {
     ) -> Result<(Manifest, Option<String>)> {
         let url = self.build_url(name, reference)?;
 
-        let accept_headers = build_accept_headers();
-
         let client_spare0 = self.clone();
+
+        let headers = build_accept_headers(&self.base_url);
 
         let res = self
             .build_reqwest(Method::GET, url.clone())
-            .headers(accept_headers)
+            .headers(headers)
             .send()
             .await?;
 
@@ -117,7 +117,7 @@ impl Client {
     pub async fn get_manifestref(&self, name: &str, reference: &str) -> Result<Option<String>> {
         let url = self.build_url(name, reference)?;
 
-        let accept_headers = build_accept_headers();
+        let accept_headers = build_accept_headers(&self.base_url);
 
         let res = self
             .build_reqwest(Method::HEAD, url)
@@ -286,7 +286,21 @@ fn evaluate_media_type(
     }
 }
 
-fn build_accept_headers() -> header::HeaderMap {
+fn build_accept_headers(registry: &str) -> header::HeaderMap {
+    if registry.ends_with("://gcr.io") || registry.ends_with(".gcr.io") {
+        // GCR incorrectly parses `q` parameters, so we use special Accept
+        // for it.
+        // Bug: https://issuetracker.google.com/issues/159827510.
+        // TODO: when bug is fixed, this workaround should be removed.
+        let mut map = header::HeaderMap::new();
+        map.insert(
+            header::ACCEPT,
+            header::HeaderValue::from_static(
+                "application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.v1+prettyjws",
+            ),
+        );
+        return map;
+    }
     header::HeaderMap::from_iter(
         [
             // accept header types and their q value, as documented in
@@ -297,15 +311,9 @@ fn build_accept_headers() -> header::HeaderMap {
             // mediatypes::MediaTypes::ManifestList,
         ]
         .iter()
-        .filter_map(|(ty, q)| {
-            match header::HeaderValue::from_str(&format!("{}; q={}", ty.to_string(), q)) {
-                Ok(header_value) => Some((header::ACCEPT, header_value)),
-                Err(e) => {
-                    let msg = format!("failed to parse HeaderValue from str: {}:", e);
-                    error!("{}", msg);
-                    None
-                }
-            }
+        .map(|(ty, q)| {
+            let header_value = header::HeaderValue::from_str(&format!("{}; q={}", ty.to_string(), q)).expect("should be always valid because both float and mime type only use allowed ASCII chard");
+            (header::ACCEPT, header_value)
         }),
     )
 }
