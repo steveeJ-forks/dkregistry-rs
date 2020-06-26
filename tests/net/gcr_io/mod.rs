@@ -124,7 +124,7 @@ fn test_gcrio_get_manifest() {
     let tag = "0.2";
 
     let fut = dclient.get_manifest(image, tag);
-    let manifest_result = runtime.block_on(fut);
-    // check that manifest was downloaded successfully
-    manifest_result.unwrap();
+    runtime
+        .block_on(fut)
+        .expect("check that manifest was downloaded successfully");
 }
